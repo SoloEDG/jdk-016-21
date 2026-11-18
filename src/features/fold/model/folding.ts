@@ -8,6 +8,7 @@ export function flatten(doc: Document) {
   doc.playing = false;
   doc.angles = {};
   doc.step = 0;
+  doc.current = doc.steps[0]?.id ?? doc.current;
 }
 export function applyTarget(doc: Document) {
   const c = doc.paper.creases.find((c) => c.id === doc.selected);

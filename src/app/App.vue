@@ -29,11 +29,28 @@ import {
   seek,
   captureStep,
   usePlayer,
+  insertStep,
+  duplicateStep,
+  moveStep,
+  setStepMode,
+  commitRemoval,
+  lockAffectedStep,
+  reanchorAffected,
+  ensureValidDocument,
+  adoptSteps,
+  focusStep,
+  auditSteps,
+} from "../features/sequence";
+import type {
+  RemovalPlan,
+  RemovalStrategy,
 } from "../features/sequence";
 import { Viewport, ObservePanel, setView } from "../features/observe";
 const doc = reactive(createDocument(papers[0]!, makeSteps(papers[0]!)));
+ensureValidDocument(doc);
 const pose = computed(() => solvePose(doc.paper, doc.angles)),
   hinges = computed(() => hingePositions(doc.paper, pose.value));
+const audits = computed(() => auditSteps(doc.paper, doc.steps));
 const { toggle } = usePlayer(doc);
 const help = ref(false),
   toast = ref("");
@@ -45,20 +62,84 @@ function choosePaper(id: string) {
   const p = papers.find((p) => p.id === id);
   if (p) {
     replacePaper(doc, p);
-    doc.steps = makeSteps(p);
+    adoptSteps(doc, makeSteps(p), 0);
     setView(doc, "iso");
   }
 }
 function reset() {
   flatten(doc);
-  doc.steps = makeSteps(doc.paper);
+  adoptSteps(doc, makeSteps(doc.paper), 0);
   setView(doc, "iso");
   notify("已回到平展纸张");
 }
 function capture() {
-  captureStep(doc);
-  notify("当前形态已保存到步骤 " + (doc.step + 1));
+  const step = captureStep(doc);
+  notify(
+    step
+      ? `步骤 ${doc.step + 1} 已按「${step.mode === "relative" ? "相对前一步" : "锁定形态"}」保存`
+      : "已保存当前步骤",
+  );
 }
+function insert() {
+  const after = doc.step + 1;
+  const step = insertStep(doc);
+  notify(`已在第 ${after} 步后插入「${step.title}」`);
+}
+function duplicate(id: string) {
+  const copy = duplicateStep(doc, id);
+  if (copy) notify(`已复制为「${copy.title}」，可独立修改`);
+}
+function move(id: string, delta: number) {
+  if (!moveStep(doc, id, delta)) return;
+  const drifted = audits.value.filter((a) => a.drifts.length).length;
+  notify(
+    drifted
+      ? `步骤已移动，${drifted} 个后续动作需要确认父纸面`
+      : `步骤已移动到第 ${doc.steps.findIndex((s) => s.id === id) + 1} 位`,
+  );
+}
+function confirmRemoval(plan: RemovalPlan, strategy: RemovalStrategy) {
+  const { removed } = commitRemoval(doc, plan, strategy);
+  notify(
+    removed > 1
+      ? `已删除 ${removed} 步（含依赖步骤），教程共 ${doc.steps.length} 步`
+      : `已删除「${plan.targetTitle}」，教程共 ${doc.steps.length} 步`,
+  );
+}
+function setMode(mode: "relative" | "absolute") {
+  setStepMode(doc, mode);
+  notify(
+    mode === "relative"
+      ? "这一步改为跟随前一步，重排后仍表达同一折法"
+      : "这一步已锁定为当前绝对形态",
+  );
+}
+function updateStep(
+  id: string,
+  patch: { title?: string; note?: string; duration?: number },
+) {
+  const step = doc.steps.find((s) => s.id === id);
+  if (!step) return;
+  if (patch.title !== undefined) step.title = patch.title;
+  if (patch.note !== undefined) step.note = patch.note;
+  if (patch.duration !== undefined)
+    step.duration = Math.max(300, Math.min(8000, patch.duration || 300));
+  step.revision += 1;
+}
+function reanchor() {
+  if (reanchorAffected(doc))
+    notify("已按新的前一步重新锚定，折法保持不变");
+}
+function lockAll() {
+  const ids = audits.value.filter((a) => a.drifts.length).map((a) => a.id);
+  ids.forEach((id) => lockAffectedStep(doc, id));
+  notify(
+    ids.length
+      ? `已把 ${ids.length} 个受影响步骤锁定为当前形态`
+      : "没有需要锁定的步骤",
+  );
+}
+
 </script>
 <template>
   <div class="workspace">
@@ -124,7 +205,9 @@ function capture() {
             @select="selectCrease(doc, $event)"
           />
           <div class="instruction">
-            <span class="instruction-number">0{{ doc.step + 1 }}</span>
+            <span class="instruction-number">{{
+              String(doc.step + 1).padStart(2, "0")
+            }}</span>
             <div>
               <b>{{ doc.steps[doc.step]?.title }}</b>
               <p>{{ doc.steps[doc.step]?.note }}</p>
@@ -150,9 +233,17 @@ function capture() {
       </div>
       <SequencePanel
         :doc="doc"
-        @seek="seek(doc, $event)"
+        @seek="(id) => seek(doc, doc.steps.findIndex((s) => s.id === id))"
         @play="toggle"
         @capture="capture"
+        @insert="insert"
+        @duplicate="duplicate"
+        @move="move"
+        @confirm="confirmRemoval"
+        @mode="setMode"
+        @update="updateStep"
+        @reanchor="reanchor"
+        @lock-all="lockAll"
       />
       <footer>
         <span>ORI / 折间 <i>用折叠，重新认识一张纸。</i></span
@@ -172,7 +263,8 @@ function capture() {
           选择纸张与颜色，点选折痕后拖动角度滑杆。父纸面转动时，关联纸面会一起运动。
         </p>
         <p>
-          下方步骤可还原对应形态，也可保存当前角度后播放。拖动画面旋转视角，滚轮缩放，下载按钮可保存当前观察图。
+          下方步骤可保存、插入、复制、重排或删除。相对步骤只记录这一折的增量，
+          重排后会提示哪些后续动作的父纸面已经变化。
         </p>
         <p>作品保留在本次会话中，刷新会重新开始。</p>
         <button class="primary" @click="help = false">开始探索 ↗</button>

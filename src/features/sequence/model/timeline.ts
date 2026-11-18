@@ -1,16 +1,16 @@
 import type { Document } from "../../../shared/types";
 import { clamp } from "../../../shared/document";
+import { ensureValidDocument, focusStep } from "./editing";
+
+export { captureStep } from "./editing";
+
+/**
+ * 按下标定位，但落点由该下标当前对应的步骤身份决定。
+ * 空教程会自动补回一个可折叠的起始步骤。
+ */
 export function seek(doc: Document, index: number) {
   doc.playing = false;
-  doc.step = clamp(index, 0, doc.steps.length - 1);
-  doc.angles = { ...doc.steps[doc.step]!.angles };
-  const c = doc.paper.creases[doc.step - 1];
-  if (c) doc.selected = c.id;
-}
-export function captureStep(doc: Document) {
-  const step = doc.steps[doc.step];
-  if (step) {
-    step.angles = { ...doc.angles };
-    step.note = "已保存当前折叠形态，可随时还原。";
-  }
+  ensureValidDocument(doc);
+  const step = doc.steps[clamp(index, 0, doc.steps.length - 1)];
+  if (step) focusStep(doc, step.id);
 }
